@@ -30,58 +30,64 @@ sudo mkdir -p /var/lib/kubernetes
 sudo cp ca.pem kubernetes-key.pem kubernetes.pem /var/lib/kubernetes/
 ```
 
-#### Docker
+#### rkt
 
-Kubernetes should be compatible with the Docker 1.9.x - 1.12.x:
-
-```
-wget https://get.docker.com/builds/Linux/x86_64/docker-1.12.1.tgz
-```
+Rkt will be the container runtime. We'll use the .deb packaged by CoreOS
 
 ```
-tar -xvf docker-1.12.1.tgz
+wget https://github.com/coreos/rkt/releases/download/v1.15.0/rkt_1.15.0-1_amd64.deb
 ```
 
 ```
-sudo cp docker/docker* /usr/bin/
+sudo dpkg -i rkt_1.15.0-1_amd64.deb
 ```
 
-Create the Docker systemd unit file:
-
+Rkt does not have a centralized runtime daemon. However, it does provide a local API service
+for the kubelet to inspect running containers.  Enable it:
 
 ```
-sudo sh -c 'echo "[Unit]
-Description=Docker Application Container Engine
-Documentation=http://docs.docker.io
+cat > rkt-api.service <<EOF
+[Unit]
+Description=rkt api service
+Documentation=http://github.com/coreos/rkt
+After=network.target rkt-api-tcp.socket
+Requires=rkt-api.socket
 
 [Service]
-ExecStart=/usr/bin/docker daemon \
-  --iptables=false \
-  --ip-masq=false \
-  --host=unix:///var/run/docker.sock \
-  --log-level=error \
-  --storage-driver=overlay
-Restart=on-failure
-RestartSec=5
+ExecStart=/usr/bin/rkt api-service
 
 [Install]
-WantedBy=multi-user.target" > /etc/systemd/system/docker.service'
+WantedBy=multi-user.target
+EOF
 ```
 
 ```
+cat > rkt-api.socket <<EOF
+[Unit]
+Description=rkt api service socket
+PartOf=rkt-api.service
+
+[Socket]
+ListenStream=127.0.0.1:15441
+ListenStream=[::1]:15441
+Service=rkt-api.service
+BindIPv6Only=both
+
+[Install]
+WantedBy=sockets.target
+EOF
+```
+
+```
+sudo mv rkt-api.* /etc/systemd/system/
 sudo systemctl daemon-reload
-sudo systemctl enable docker
-sudo systemctl start docker
+sudo systemctl enable rkt-metadata.socket rkt-api.socket
+sudo systemctl start rkt-metadata.socket rkt-api.socket
 ```
-
-```
-sudo docker version
-```
-
 
 #### kubelet
 
-The Kubernetes kubelet no longer relies on docker networking for pods! The Kubelet can now use [CNI - the Container Network Interface](https://github.com/containernetworking/cni) to manage machine level networking requirements.
+The Kubernetes kubelet can now use [CNI - the Container Network Interface](https://github.com/containernetworking/cni) to manage machine level networking requirements.
 
 Download and install CNI plugins
 
@@ -148,8 +154,6 @@ Create the kubelet systemd unit file:
 sudo sh -c 'echo "[Unit]
 Description=Kubernetes Kubelet
 Documentation=https://github.com/GoogleCloudPlatform/kubernetes
-After=docker.service
-Requires=docker.service
 
 [Service]
 ExecStart=/usr/bin/kubelet \
@@ -159,8 +163,9 @@ ExecStart=/usr/bin/kubelet \
   --cluster-dns=10.32.0.10 \
   --cluster-domain=cluster.local \
   --configure-cbr0=true \
-  --container-runtime=docker \
-  --docker=unix:///var/run/docker.sock \
+  --container-runtime=rkt \
+  --rkt-path=/usr/bin/rkt \
+  --rkt-api-endpoint=localhost:15441 \
   --network-plugin=kubenet \
   --kubeconfig=/var/lib/kubelet/kubeconfig \
   --reconcile-cidr=true \
